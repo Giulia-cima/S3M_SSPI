@@ -16,7 +16,12 @@ diagnostic_folder = "/home/idrologia/share/PhD_GiuliaBlandini_dati/DAO_project/p
 output_plot = "/home/idrologia/share/PhD_GiuliaBlandini_dati/DAO_project/plots/sspi_map.png"
 os.makedirs(diagnostic_folder, exist_ok=True)
 
-winter_months = [10, 11, 12, 1, 2, 3]
+winter_months = [11, 12, 1, 2, 3, 4, 5]
+
+# =========================================================
+# DIAGNOSTIC TABLE
+# =========================================================
+fit_results = []
 
 
 # =========================================================
@@ -91,12 +96,16 @@ for basin in basins:
             continue
 
         shape, loc, scale = stats.gamma.fit(x_pos, floc=0)
+        # verify with a kolmogorov-smirnov test the fitting of the gamma distribution
+        ks_stat, p_value = stats.kstest(x_pos, 'gamma', args=(shape, loc, scale))
+
 
         # compute SSPI ONLY on valid subset
         sspi_vals = calculate_sspi(x, shape, loc, scale, p0)
 
         # IMPORTANT: assign using subset_valid index (NOT mask)
         sspi_series.loc[subset_valid.index] = sspi_vals
+
 
         fig, ax = plt.subplots(figsize=(6, 4))
 
@@ -139,6 +148,18 @@ for basin in basins:
 
         plt.close()
 
+        # save diagnostics
+        fit_results.append({
+            "basin": basin,
+            "month": month,
+            "shape": shape,
+            "loc": loc,
+            "scale": scale,
+            "ks_stat": ks_stat,
+            "ks_pvalue": p_value,
+            "n_samples": len(x_pos)
+        })
+
     sspi_df[basin] = sspi_series
 
 
@@ -150,8 +171,28 @@ sspi_df.to_pickle(output_pkl)
 
 print("SSPI saved to:", output_pkl)
 
+
 # =========================================================
-# JANUARY CLIMATOLOGY (AVERAGE OVER YEARS)
+# CREATE DIAGNOSTIC TABLE
+# =========================================================
+fit_df = pd.DataFrame(fit_results)
+# optional: multi-index table
+fit_df = fit_df.set_index(["month", "basin"]).sort_index()
+
+pivot_df = fit_df.reset_index().pivot(
+    index="month",
+    columns="basin",
+    values=["shape", "loc", "scale", "ks_stat", "ks_pvalue", "n_samples"]
+)
+pivot_df.to_csv(
+    "/home/idrologia/share/PhD_GiuliaBlandini_dati/DAO_project/timeseries/gamma_fit_pivot_table.csv"
+)
+print("Gamma fit diagnostics saved")
+
+
+
+# =========================================================
+# JANUARY CLIMATOLOGY (AVERAGE OVER YEARS TO CHECK IF THE CODE WORKS)
 # =========================================================
 selected_month = 1
 jan_sspi = sspi_df[sspi_df.index.month == selected_month]
@@ -226,3 +267,98 @@ plt.savefig(output_plot, dpi=300)
 plt.close()
 
 print("Map saved:", output_plot)
+
+
+
+# =========================================================
+# MONTHLY MAPS FOR EACH YEAR-MONTH
+# =========================================================
+
+monthly_maps_folder = "/home/idrologia/share/PhD_GiuliaBlandini_dati/DAO_project/plots/monthly_sspi_maps/"
+os.makedirs(monthly_maps_folder, exist_ok=True)
+
+# =========================================================
+# GLOBAL COLOR SCALE (consistent among all maps)
+# =========================================================
+all_values = sspi_df.values.flatten()
+all_values = all_values[np.isfinite(all_values)]
+
+vmax = np.nanmax(np.abs(all_values))
+
+if vmax == 0:
+    vmax = 1e-6
+
+bounds = np.linspace(-vmax, vmax, 9)
+
+cmap = plt.get_cmap("RdBu_r")
+norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+# =========================================================
+# LOOP OVER ALL DATES
+# =========================================================
+for date in sspi_df.index:
+
+    year = date.year
+    month = date.month
+
+    print(f"Processing {year}-{month:02d}")
+
+    # ---------------------------------------------
+    # Extract SSPI values for one timestamp
+    # ---------------------------------------------
+    basin_values = sspi_df.loc[date].to_frame(name="SSPI")
+
+    basin_values["basin_name"] = basin_values.index
+
+    # ---------------------------------------------
+    # Merge with shapefile
+    # ---------------------------------------------
+    plot_gdf = basins_shp.merge(
+        basin_values,
+        on="basin_name",
+        how="left"
+    )
+
+    # ---------------------------------------------
+    # Plot
+    # ---------------------------------------------
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    plot_gdf.plot(
+        column="SSPI",
+        cmap=cmap,
+        norm=norm,
+        edgecolor="black",
+        linewidth=0.5,
+        ax=ax,
+        missing_kwds={"color": "lightgrey"}
+    )
+
+    # colorbar
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm._A = []
+
+    cbar = fig.colorbar(sm, ax=ax)
+    cbar.set_label("SSPI")
+
+    ax.set_title(f"SSPI - {year}-{month:02d}")
+    ax.axis("off")
+
+    plt.tight_layout()
+
+    # ---------------------------------------------
+    # Save figure
+    # ---------------------------------------------
+    outfile = os.path.join(
+        monthly_maps_folder,
+        f"SSPI_{year}_{month:02d}.png"
+    )
+
+    plt.savefig(outfile, dpi=300)
+    plt.close()
+
+print("All monthly maps saved.")
+
+
+
+

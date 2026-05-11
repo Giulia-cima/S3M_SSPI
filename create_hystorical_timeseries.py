@@ -7,7 +7,12 @@ import rasterio
 import geopandas as gpd
 from rasterio.mask import mask
 from datetime import datetime
+import warnings
 
+warnings.filterwarnings(
+    "ignore",
+    message="Geometry is in a geographic CRS.*"
+)
 pattern = re.compile(r"ITSNOW500-(SWE|HS)_(\d{14})\.tif")
 
 def extract_timestamp(fname):
@@ -103,8 +108,8 @@ for i, date in enumerate(period, start=1):
             results.append({
                 "date": date,
                 "basin": basin_name,
-                "SWE": -9999.0,
-                "HS": -9999.0
+                "SWE": 0.0,
+                "HS": 0.0
             })
         logging.warning(f"Missing file at {date}")
         continue
@@ -115,47 +120,44 @@ for i, date in enumerate(period, start=1):
     try:
         with rasterio.open(swe_path) as swe_src, rasterio.open(hs_path) as hs_src:
 
-            # reproject basins ONCE per CRS
-            if basins_proj is None:
-                logging.info("Reprojecting basins to raster CRS...")
-                basins_proj = {
-                    name: gdf.to_crs(swe_src.crs)
-                    for name, gdf in basins.items()
-                }
 
             nodata_swe = swe_src.nodata
             nodata_hs = hs_src.nodata
 
-            for basin_name, gdf in basins_proj.items():
-
+            for basin_name, gdf in basins.items():
                 geoms = [geom for geom in gdf.geometry if geom is not None]
+                # suppress warnings about empty geometries
+
+                cell_area = gdf.geometry.area.mean() if not gdf.empty else 0.0
 
                 try:
                     swe_img, _ = mask(swe_src, geoms, crop=True, all_touched=True)
-                    hs_img, _  = mask(hs_src, geoms, crop=True, all_touched=True)
+                    hs_img, _ = mask(hs_src, geoms, crop=True, all_touched=True)
 
                     swe = swe_img[0]
                     hs = hs_img[0]
 
+                    if nodata_swe is not None:
+                        swe[swe == nodata_swe] = 0.0
+                    if nodata_hs is not None:
+                        hs[hs == nodata_hs] = 0.0
+
                     swe = swe.astype("float32")
                     hs = hs.astype("float32")
 
-                    if nodata_swe is not None:
-                        swe[swe == nodata_swe] = np.nan
-                    if nodata_hs is not None:
-                        hs[hs == nodata_hs] = np.nan
+                    swe = (swe/1000) * cell_area
+                    hs = (hs/1000) * cell_area
 
-                    swe_mean = float(np.nanmean(swe)) if np.isfinite(swe).any() else -9999.0
-                    hs_mean = float(np.nanmean(hs)) if np.isfinite(hs).any() else -9999.0
-
+                    swe_sum = np.nansum(swe)
+                    hs_sum = np.nansum(hs)
                 except ValueError:
-                    swe_mean, hs_mean = -9999.0, -9999.0
+                    swe_sum, hs_sum = 0.0, 0.0
 
                 results.append({
                     "date": date,
                     "basin": basin_name,
-                    "SWE": swe_mean,
-                    "HS": hs_mean
+                    "SWE": swe_sum,
+                    "HS": hs_sum
                 })
 
         logging.info(f"Processed {date}")
@@ -167,8 +169,8 @@ for i, date in enumerate(period, start=1):
             results.append({
                 "date": date,
                 "basin": basin_name,
-                "SWE": -9999.0,
-                "HS": -9999.0
+                "SWE":  0.0,
+                "HS":  0.0
             })
     # ---------------------------
     # SAVE INTERMEDIATE RESULTS
